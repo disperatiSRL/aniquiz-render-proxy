@@ -17,117 +17,384 @@ const SITES = {
 app.disable("x-powered-by");
 
 
-/* =========================
+/* =========================================================
    HEALTH
-========================= */
+========================================================= */
 
-app.get("/health", (req, res) => {
+app.get("/health", (_req, res) => {
+
     res.json({
         ok: true,
         service: "AniQuiz Proxy"
     });
+
 });
 
 
-/* =========================
-   PROXY FUNCTION
-========================= */
+/* =========================================================
+   URL REWRITE
+========================================================= */
 
-async function proxySite(req, res, siteKey, path = "/") {
+function rewriteURLs(text, siteKey, targetBase) {
 
-    const targetBase = SITES[siteKey];
+    const proxyPrefix = "/" + siteKey;
+
+    const targetURL = new URL(targetBase);
+
+    const origin = targetURL.origin;
+    const host = targetURL.host;
+
+
+    /*
+     * -----------------------------------------------------
+     * URL ASSOLUTI
+     *
+     * https://jujutsudle.com/foo
+     *
+     * ->
+     *
+     * /jujutsu/foo
+     * -----------------------------------------------------
+     */
+
+    text = text.split(origin).join(
+        proxyPrefix
+    );
+
+
+    /*
+     * -----------------------------------------------------
+     * URL PROTOCOL RELATIVE
+     *
+     * //jujutsudle.com/foo
+     *
+     * ->
+     *
+     * /jujutsu/foo
+     * -----------------------------------------------------
+     */
+
+    text = text.split(
+        "//" + host
+    ).join(
+        proxyPrefix
+    );
+
+
+    /*
+     * -----------------------------------------------------
+     * HTML:
+     *
+     * src="/foo"
+     * href="/foo"
+     * action="/foo"
+     * poster="/foo"
+     * -----------------------------------------------------
+     */
+
+    text = text.replace(
+        /((?:src|href|action|poster|content)\s*=\s*["'])\/(?!\/)/gi,
+        `$1${proxyPrefix}/`
+    );
+
+
+    /*
+     * -----------------------------------------------------
+     * HTML / JS:
+     *
+     * url("/foo")
+     *
+     * -----------------------------------------------------
+     */
+
+    text = text.replace(
+        /(\(\s*["'])\/(?!\/)/g,
+        `$1${proxyPrefix}/`
+    );
+
+
+    /*
+     * -----------------------------------------------------
+     * JAVASCRIPT:
+     *
+     * "/images/foo.webp"
+     * '/images/foo.webp'
+     *
+     * ->
+     *
+     * "/jujutsu/images/foo.webp"
+     * -----------------------------------------------------
+     */
+
+    text = text.replace(
+        /(["'`])\/(?!\/)([^"'`\s<>{}]+)/g,
+        (match, quote, path) => {
+
+            /*
+             * Non modificare:
+             *
+             * /jujutsu/...
+             */
+
+            if (
+                path.startsWith(
+                    siteKey + "/"
+                )
+            ) {
+                return match;
+            }
+
+
+            return (
+                quote +
+                proxyPrefix +
+                "/" +
+                path
+            );
+        }
+    );
+
+
+    /*
+     * -----------------------------------------------------
+     * CSS:
+     *
+     * url(/images/foo.webp)
+     * -----------------------------------------------------
+     */
+
+    text = text.replace(
+        /url\(\s*["']?\/(?!\/)([^)"']+)/gi,
+        (match, path) => {
+
+            return (
+                `url(${proxyPrefix}/${path}`
+            );
+
+        }
+    );
+
+
+    return text;
+}
+
+
+/* =========================================================
+   REMOVE SECURITY HEADERS
+========================================================= */
+
+function cleanHeaders(res) {
+
+    res.removeHeader(
+        "x-frame-options"
+    );
+
+    res.removeHeader(
+        "content-security-policy"
+    );
+
+    res.removeHeader(
+        "permissions-policy"
+    );
+
+}
+
+
+/* =========================================================
+   PROXY
+========================================================= */
+
+async function proxySite(
+    req,
+    res,
+    siteKey,
+    requestedPath
+) {
+
+    const targetBase =
+        SITES[siteKey];
+
 
     if (!targetBase) {
-        return res.status(404).send("Unknown site");
+
+        return res
+            .status(404)
+            .send("Unknown AniDle");
+
+    }
+
+
+    if (
+        !requestedPath ||
+        requestedPath === ""
+    ) {
+
+        requestedPath = "/";
+
+    }
+
+
+    if (
+        !requestedPath.startsWith("/")
+    ) {
+
+        requestedPath =
+            "/" + requestedPath;
+
     }
 
 
     /*
-     * Normalizziamo il path.
+     * Query string
      */
-    if (!path.startsWith("/")) {
-        path = "/" + path;
-    }
 
-
-    /*
-     * Query string.
-     */
     const query =
-        new URLSearchParams(req.query).toString();
+        new URLSearchParams(
+            req.query
+        ).toString();
 
 
     const targetURL =
         targetBase +
-        path +
-        (query ? "?" + query : "");
+        requestedPath +
+        (
+            query
+                ? "?" + query
+                : ""
+        );
 
 
     console.log(
-        `[${siteKey}] ${req.method} ${targetURL}`
+        `[${siteKey}] → ${req.method} ${targetURL}`
     );
 
 
     try {
 
-        const headers = {};
+        const requestHeaders = {};
 
 
         /*
-         * Browser User-Agent
+         * User-Agent
          */
-        if (req.headers["user-agent"]) {
-            headers["User-Agent"] =
-                req.headers["user-agent"];
+
+        if (
+            req.headers["user-agent"]
+        ) {
+
+            requestHeaders[
+                "User-Agent"
+            ] =
+                req.headers[
+                    "user-agent"
+                ];
+
         }
 
 
         /*
          * Accept
          */
-        if (req.headers["accept"]) {
-            headers["Accept"] =
-                req.headers["accept"];
+
+        if (
+            req.headers["accept"]
+        ) {
+
+            requestHeaders[
+                "Accept"
+            ] =
+                req.headers[
+                    "accept"
+                ];
+
         }
 
 
         /*
-         * Language
+         * Accept-Language
          */
-        if (req.headers["accept-language"]) {
-            headers["Accept-Language"] =
-                req.headers["accept-language"];
+
+        if (
+            req.headers[
+                "accept-language"
+            ]
+        ) {
+
+            requestHeaders[
+                "Accept-Language"
+            ] =
+                req.headers[
+                    "accept-language"
+                ];
+
         }
 
 
         /*
          * Cookie
          */
-        if (req.headers["cookie"]) {
-            headers["Cookie"] =
-                req.headers["cookie"];
+
+        if (
+            req.headers["cookie"]
+        ) {
+
+            requestHeaders[
+                "Cookie"
+            ] =
+                req.headers[
+                    "cookie"
+                ];
+
         }
 
 
-        const response = await fetch(
-            targetURL,
-            {
-                method: req.method,
-                headers,
-                redirect: "manual"
-            }
-        );
+        /*
+         * Referer
+         */
+
+        requestHeaders[
+            "Referer"
+        ] =
+            targetBase + "/";
+
+
+        /*
+         * Origin
+         */
+
+        requestHeaders[
+            "Origin"
+        ] =
+            targetBase;
+
+
+        const response =
+            await fetch(
+                targetURL,
+                {
+                    method:
+                        req.method === "HEAD"
+                            ? "HEAD"
+                            : "GET",
+
+                    headers:
+                        requestHeaders,
+
+                    redirect:
+                        "manual"
+                }
+            );
 
 
         console.log(
-            `[${siteKey}] RESPONSE ${response.status}`
+            `[${siteKey}] ← ${response.status}`
         );
 
 
         /*
-         * =========================
+         * =================================================
          * REDIRECT
-         * =========================
+         * =================================================
          */
 
         if (
@@ -136,7 +403,9 @@ async function proxySite(req, res, siteKey, path = "/") {
         ) {
 
             const location =
-                response.headers.get("location");
+                response.headers.get(
+                    "location"
+                );
 
 
             if (location) {
@@ -153,18 +422,23 @@ async function proxySite(req, res, siteKey, path = "/") {
                     /*
                      * Redirect interno
                      */
+
                     if (
                         redirectURL.origin ===
-                        new URL(targetBase).origin
+                        new URL(
+                            targetBase
+                        ).origin
                     ) {
 
                         return res.redirect(
+
                             response.status,
 
                             "/" +
                             siteKey +
                             redirectURL.pathname +
                             redirectURL.search
+
                         );
 
                     }
@@ -173,6 +447,7 @@ async function proxySite(req, res, siteKey, path = "/") {
                     /*
                      * Redirect esterno
                      */
+
                     return res.redirect(
                         response.status,
                         location
@@ -184,14 +459,19 @@ async function proxySite(req, res, siteKey, path = "/") {
                         response.status,
                         location
                     );
+
                 }
+
             }
+
         }
 
 
         /*
-         * Content-Type
-         */
+         * =================================================
+         * CONTENT TYPE
+         * ================================================= */
+
         const contentType =
             response.headers.get(
                 "content-type"
@@ -199,177 +479,98 @@ async function proxySite(req, res, siteKey, path = "/") {
 
 
         /*
-         * =========================
-         * HTML
-         * =========================
-         */
+         * =================================================
+         * TESTO / HTML / JS / JSON / CSS
+         * ================================================= */
 
-        if (
+        const shouldRewrite =
             contentType.includes(
                 "text/html"
-            )
-        ) {
+            ) ||
+            contentType.includes(
+                "javascript"
+            ) ||
+            contentType.includes(
+                "application/json"
+            ) ||
+            contentType.includes(
+                "text/css"
+            ) ||
+            contentType.includes(
+                "text/plain"
+            );
 
-            let html =
+
+        if (shouldRewrite) {
+
+            let body =
                 await response.text();
 
 
-            const origin =
-                new URL(
+            body =
+                rewriteURLs(
+                    body,
+                    siteKey,
                     targetBase
-                ).origin;
-
-
-            const host =
-                new URL(
-                    targetBase
-                ).host;
-
-
-            const proxyPrefix =
-                "/" + siteKey;
+                );
 
 
             /*
-             * Elimina CSP META
+             * Status
              */
-            html = html.replace(
-                /<meta[^>]*http-equiv\s*=\s*["']?Content-Security-Policy["']?[^>]*>/gi,
-                ""
-            );
 
-
-            /*
-             * Elimina X-Frame-Options META
-             */
-            html = html.replace(
-                /<meta[^>]*http-equiv\s*=\s*["']?X-Frame-Options["']?[^>]*>/gi,
-                ""
-            );
-
-
-            /*
-             * Elimina <base>
-             */
-            html = html.replace(
-                /<base\b[^>]*>/gi,
-                ""
-            );
-
-
-            /*
-             * URL assoluti
-             *
-             * https://jujutsudle.com/foo
-             *
-             * ->
-             *
-             * /jujutsu/foo
-             */
-            html = html.split(origin).join(
-                proxyPrefix
-            );
-
-
-            /*
-             * URL //
-             */
-            html = html.split(
-                "//" + host
-            ).join(
-                proxyPrefix
-            );
-
-
-            /*
-             * URL root-relative
-             *
-             * src="/foo.js"
-             *
-             * ->
-             *
-             * src="/jujutsu/foo.js"
-             */
-            html = html.replace(
-                /(src|href|action|poster)\s*=\s*(["'])\/(?!\/)/gi,
-
-                (match, attribute, quote) => {
-
-                    return (
-                        attribute +
-                        "=" +
-                        quote +
-                        proxyPrefix +
-                        "/"
-                    );
-
-                }
-            );
-
-
-            /*
-             * Attributi senza virgolette
-             */
-            html = html.replace(
-                /(src|href|action|poster)\s*=\s*\/(?!\/)/gi,
-
-                (match, attribute) => {
-
-                    return (
-                        attribute +
-                        "=" +
-                        proxyPrefix +
-                        "/"
-                    );
-
-                }
-            );
-
-
-            /*
-             * Header
-             */
             res.status(
                 response.status
             );
 
 
+            /*
+             * Content-Type
+             */
+
             res.set(
                 "Content-Type",
-                "text/html; charset=utf-8"
+                contentType
             );
 
 
             /*
-             * IMPORTANTE:
-             * non mandiamo X-Frame-Options.
+             * Sicurezza iframe
              */
+
+            cleanHeaders(res);
+
+
+            /*
+             * Evitiamo problemi di
+             * Content-Length.
+             */
+
             res.removeHeader(
-                "X-Frame-Options"
+                "content-length"
+            );
+
+            res.removeHeader(
+                "content-encoding"
             );
 
 
-            res.removeHeader(
-                "Content-Security-Policy"
-            );
-
-
-            res.removeHeader(
-                "Permissions-Policy"
-            );
-
-
-            res.send(html);
+            res.send(body);
 
             return;
+
         }
 
 
         /*
-         * =========================
-         * FILE / RISORSE
-         * =========================
-         */
+         * =================================================
+         * FILE BINARI
+         *
+         * immagini
+         * font
+         * video
+         * ecc.
+         * ================================================= */
 
         const buffer =
             Buffer.from(
@@ -392,51 +593,51 @@ async function proxySite(req, res, siteKey, path = "/") {
         }
 
 
-        /*
-         * CORS
-         */
-        res.set(
-            "Access-Control-Allow-Origin",
-            "*"
-        );
+        cleanHeaders(res);
 
 
         res.send(buffer);
 
-
     } catch (error) {
 
         console.error(
-            `[${siteKey}] ERROR`,
+            `[${siteKey}] PROXY ERROR:`,
             error
         );
 
 
-        res.status(502).json({
+        res
+            .status(502)
+            .json({
 
-            error:
-                "Bad Gateway",
+                error:
+                    "Bad Gateway",
 
-            message:
-                error.message,
+                message:
+                    error.message,
 
-            target:
-                targetURL
+                target:
+                    targetURL
 
-        });
+            });
+
     }
+
 }
 
 
-/* =========================
+/* =========================================================
    ROUTES
-========================= */
+========================================================= */
 
-for (const siteKey of Object.keys(SITES)) {
+for (
+    const siteKey of Object.keys(SITES)
+) {
 
     /*
      * /jujutsu
      */
+
     app.get(
         "/" + siteKey,
         (req, res) => {
@@ -455,6 +656,7 @@ for (const siteKey of Object.keys(SITES)) {
     /*
      * /jujutsu/
      */
+
     app.get(
         "/" + siteKey + "/",
         (req, res) => {
@@ -473,12 +675,15 @@ for (const siteKey of Object.keys(SITES)) {
     /*
      * /jujutsu/qualcosa
      */
+
     app.get(
         "/" + siteKey + "/*",
         (req, res) => {
 
             const prefix =
-                "/" + siteKey + "/";
+                "/" +
+                siteKey +
+                "/";
 
 
             let path =
@@ -487,8 +692,13 @@ for (const siteKey of Object.keys(SITES)) {
                 );
 
 
-            if (!path.startsWith("/")) {
-                path = "/" + path;
+            if (
+                !path.startsWith("/")
+            ) {
+
+                path =
+                    "/" + path;
+
             }
 
 
@@ -501,12 +711,13 @@ for (const siteKey of Object.keys(SITES)) {
 
         }
     );
+
 }
 
 
-/* =========================
+/* =========================================================
    START
-========================= */
+========================================================= */
 
 app.listen(
     PORT,
@@ -514,7 +725,7 @@ app.listen(
     () => {
 
         console.log(
-            `AniQuiz Proxy running on ${PORT}`
+            `AniQuiz Proxy listening on ${PORT}`
         );
 
     }
