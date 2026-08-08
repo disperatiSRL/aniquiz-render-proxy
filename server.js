@@ -1,10 +1,9 @@
 import express from "express";
-import { createProxyMiddleware } from "http-proxy-middleware";
+import { createProxyMiddleware, responseInterceptor } from "http-proxy-middleware";
 
 const app = express();
 
-const PORT = Number(process.env.PORT) || 10000;
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
+const PORT = process.env.PORT || 10000;
 
 const SITES = {
     jujutsu: "https://jujutsudle.com",
@@ -18,21 +17,16 @@ const SITES = {
 
 app.disable("x-powered-by");
 
+
 /* =========================
-   HEALTH CHECK
+   HEALTH
 ========================= */
 
-app.get("/health", (_req, res) => {
+app.get("/health", (req, res) => {
     res.json({
         ok: true,
-        service: "aniquiz-render-proxy"
+        service: "AniQuiz Proxy"
     });
-});
-
-app.get("/", (_req, res) => {
-    res.type("text").send(
-        "AniQuiz AniDle proxy is running."
-    );
 });
 
 
@@ -40,139 +34,83 @@ app.get("/", (_req, res) => {
    HTML REWRITE
 ========================= */
 
-function rewriteHtml(html, siteKey) {
+function rewriteHTML(html, siteKey) {
 
     const target = SITES[siteKey];
+    const proxyPrefix = "/" + siteKey;
 
     const targetURL = new URL(target);
 
-    const proxyBase = "/" + siteKey;
-
-
     /*
-     * Rimuove eventuale CSP inserita
-     * direttamente nell'HTML.
+     * Rimuove CSP inserita come META
      */
     html = html.replace(
         /<meta[^>]+http-equiv\s*=\s*["']?Content-Security-Policy["']?[^>]*>/gi,
         ""
     );
 
-
     /*
-     * Rimuove <base href="...">
+     * Rimuove <base>
      */
     html = html.replace(
         /<base\b[^>]*>/gi,
         ""
     );
 
-
     /*
-     * URL assoluti:
+     * URL assoluti
      *
-     * https://jujutsudle.com/foo.js
+     * https://jujutsudle.com/xxx
      *
-     * diventa:
+     * ->
      *
-     * /jujutsu/foo.js
+     * /jujutsu/xxx
      */
-    const escapedOrigin =
-        target.replace(
-            /[.*+?^${}()|[\]\\]/g,
-            "\\$&"
-        );
+    const escapedOrigin = target.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        "\\$&"
+    );
 
     html = html.replace(
         new RegExp(escapedOrigin, "gi"),
-        proxyBase
+        proxyPrefix
     );
 
-
     /*
-     * URL del tipo:
-     *
-     * //jujutsudle.com/foo.js
+     * URL //jujutsudle.com/xxx
      */
-    const escapedHost =
-        targetURL.host.replace(
-            /[.*+?^${}()|[\]\\]/g,
-            "\\$&"
-        );
-
-    html = html.replace(
-        new RegExp(
-            "//" + escapedHost,
-            "gi"
-        ),
-        proxyBase
+    const escapedHost = targetURL.host.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        "\\$&"
     );
 
+    html = html.replace(
+        new RegExp("//" + escapedHost, "gi"),
+        proxyPrefix
+    );
 
     /*
-     * Riscrive URL root-relative:
+     * URL root-relative.
      *
-     * src="/assets/app.js"
+     * src="/app.js"
      *
-     * diventa:
+     * ->
      *
-     * src="/jujutsu/assets/app.js"
-     *
-     * Stessa cosa per href, action e poster.
+     * src="/jujutsu/app.js"
      */
     html = html.replace(
-        /(href|src|action|poster)\s*=\s*(["'])\/(?!\/)/gi,
-        function (_match, attribute, quote) {
-
-            return (
-                attribute +
-                "=" +
-                quote +
-                proxyBase +
-                "/"
-            );
+        /(src|href|action|poster)\s*=\s*(["'])\/(?!\/)/gi,
+        (match, attr, quote) => {
+            return `${attr}=${quote}${proxyPrefix}/`;
         }
     );
-
 
     return html;
 }
 
 
 /* =========================
-   COOKIE REWRITE
-========================= */
-
-function rewriteCookies(cookies) {
-
-    if (!cookies) {
-        return cookies;
-    }
-
-    return cookies.map(cookie => {
-
-        return cookie
-            /*
-             * Elimina Domain=...
-             */
-            .replace(
-                /;\s*Domain=[^;]*/gi,
-                ""
-            )
-
-            /*
-             * Il cookie appartiene al proxy.
-             */
-            .replace(
-                /;\s*Path=[^;]*/gi,
-                "; Path=/"
-            );
-    });
-}
-
-
-/* =========================
-   CREA PROXY
+   CREATE PROXY
 ========================= */
 
 function createSiteProxy(siteKey) {
@@ -183,261 +121,241 @@ function createSiteProxy(siteKey) {
 
         target,
 
+        /*
+         * IMPORTANTISSIMO:
+         * usa l'host del sito originale.
+         */
         changeOrigin: true,
 
         secure: true,
 
         ws: true,
 
-        xfwd: true,
+        followRedirects: true,
 
         selfHandleResponse: true,
 
-
         /*
-         * /jujutsu/assets/app.js
+         * Non facciamo più pathRewrite.
          *
-         * diventa:
-         *
-         * /assets/app.js
+         * Express /jujutsu rimuove già il mount
+         * prima di passare la richiesta al middleware.
          */
-        pathRewrite: (path) => {
-
-            const prefix =
-                "/" + siteKey;
-
-            let newPath;
-
-            if (path.startsWith(prefix)) {
-
-                newPath =
-                    path.substring(
-                        prefix.length
-                    );
-
-            } else {
-
-                newPath = path;
-            }
-
-
-            if (!newPath) {
-                newPath = "/";
-            }
-
-
-            return newPath;
-        },
-
 
         on: {
 
-            /* =====================
-               REQUEST
-            ===================== */
+            proxyReq: (proxyReq, req) => {
 
-            proxyReq: (proxyReq) => {
+                /*
+                 * User-Agent del browser.
+                 */
+                if (req.headers["user-agent"]) {
 
-                proxyReq.removeHeader(
-                    "host"
-                );
+                    proxyReq.setHeader(
+                        "user-agent",
+                        req.headers["user-agent"]
+                    );
+                }
 
+                /*
+                 * Accetta HTML normale.
+                 */
                 proxyReq.setHeader(
-                    "origin",
-                    target
+                    "accept",
+                    req.headers["accept"] ||
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
                 );
 
-                proxyReq.setHeader(
-                    "referer",
-                    target + "/"
-                );
+                /*
+                 * NON impostiamo Origin.
+                 * NON impostiamo Referer.
+                 *
+                 * Lasciamo che il proxy gestisca
+                 * la richiesta normalmente.
+                 */
             },
 
 
-            /* =====================
-               RESPONSE
-            ===================== */
+            proxyRes: responseInterceptor(
+                async (responseBuffer, proxyRes, req, res) => {
 
-            proxyRes: (proxyRes, req, res) => {
+                    const headers = {
+                        ...proxyRes.headers
+                    };
 
-                const headers = {
-                    ...proxyRes.headers
-                };
+                    /*
+                     * Elimina X-Frame-Options
+                     */
+                    delete headers[
+                        "x-frame-options"
+                    ];
 
+                    /*
+                     * Elimina CSP HTTP.
+                     */
+                    delete headers[
+                        "content-security-policy"
+                    ];
 
-                /*
-                 * Rimuoviamo X-Frame-Options
-                 */
-                delete headers[
-                    "x-frame-options"
-                ];
-
-
-                /*
-                 * Rimuoviamo CSP HTTP
-                 */
-                delete headers[
-                    "content-security-policy"
-                ];
-
-
-                /*
-                 * Cookie
-                 */
-                if (
-                    headers["set-cookie"]
-                ) {
-
-                    headers["set-cookie"] =
-                        rewriteCookies(
-                            headers["set-cookie"]
-                        );
-                }
+                    /*
+                     * Elimina Permissions-Policy
+                     *
+                     * Non è necessario per il proxy,
+                     * ma evita i warning che stai vedendo.
+                     */
+                    delete headers[
+                        "permissions-policy"
+                    ];
 
 
-                const contentType =
-                    headers["content-type"] ||
-                    "";
+                    /*
+                     * Cookie
+                     */
+                    if (
+                        headers["set-cookie"]
+                    ) {
 
+                        headers["set-cookie"] =
+                            headers["set-cookie"].map(
+                                cookie => {
 
-                /*
-                 * HTML
-                 */
-                if (
-                    contentType.includes(
-                        "text/html"
-                    )
-                ) {
-
-                    const chunks = [];
-
-
-                    proxyRes.on(
-                        "data",
-                        chunk => {
-                            chunks.push(chunk);
-                        }
-                    );
-
-
-                    proxyRes.on(
-                        "end",
-                        () => {
-
-                            let html =
-                                Buffer
-                                    .concat(chunks)
-                                    .toString("utf8");
-
-
-                            html =
-                                rewriteHtml(
-                                    html,
-                                    siteKey
-                                );
-
-
-                            delete headers[
-                                "content-length"
-                            ];
-
-                            delete headers[
-                                "content-encoding"
-                            ];
-
-
-                            res.writeHead(
-                                proxyRes.statusCode ||
-                                    200,
-                                {
-                                    ...headers,
-
-                                    "content-type":
-                                        "text/html; charset=utf-8",
-
-                                    "access-control-allow-origin":
-                                        ALLOWED_ORIGIN,
-
-                                    "access-control-allow-credentials":
-                                        "true"
+                                    return cookie
+                                        .replace(
+                                            /;\s*Domain=[^;]*/gi,
+                                            ""
+                                        )
+                                        .replace(
+                                            /;\s*SameSite=None/gi,
+                                            "; SameSite=Lax"
+                                        );
                                 }
                             );
+                    }
 
 
-                            res.end(html);
+                    /*
+                     * Controlliamo il content-type.
+                     */
+                    const contentType =
+                        headers["content-type"] ||
+                        "";
+
+
+                    let body =
+                        responseBuffer;
+
+
+                    /*
+                     * HTML
+                     */
+                    if (
+                        contentType.includes(
+                            "text/html"
+                        )
+                    ) {
+
+                        const html =
+                            responseBuffer.toString(
+                                "utf8"
+                            );
+
+                        body =
+                            rewriteHTML(
+                                html,
+                                siteKey
+                            );
+                    }
+
+
+                    /*
+                     * Se il sito risponde con redirect,
+                     * convertiamo il redirect al proxy.
+                     */
+                    if (
+                        headers.location
+                    ) {
+
+                        try {
+
+                            const redirectURL =
+                                new URL(
+                                    headers.location,
+                                    target
+                                );
+
+                            if (
+                                redirectURL.origin ===
+                                new URL(target).origin
+                            ) {
+
+                                headers.location =
+                                    "/" +
+                                    siteKey +
+                                    redirectURL.pathname +
+                                    redirectURL.search;
+                            }
+
+                        } catch (error) {
+
+                            console.log(
+                                "Redirect non riscrivibile:",
+                                headers.location
+                            );
                         }
+                    }
+
+
+                    /*
+                     * Il body è stato modificato,
+                     * quindi Content-Length originale
+                     * non è più valido.
+                     */
+                    delete headers[
+                        "content-length"
+                    ];
+
+                    delete headers[
+                        "content-encoding"
+                    ];
+
+
+                    /*
+                     * CORS
+                     */
+                    headers[
+                        "access-control-allow-origin"
+                    ] = "*";
+
+
+                    /*
+                     * Restituisce la risposta.
+                     */
+                    res.writeHead(
+                        proxyRes.statusCode || 200,
+                        headers
                     );
 
-
-                    return;
+                    return body;
                 }
+            ),
 
-
-                /*
-                 * Tutte le altre risorse:
-                 *
-                 * JS
-                 * CSS
-                 * immagini
-                 * font
-                 * JSON
-                 * ecc.
-                 */
-                res.writeHead(
-                    proxyRes.statusCode ||
-                        200,
-                    {
-                        ...headers,
-
-                        "access-control-allow-origin":
-                            ALLOWED_ORIGIN,
-
-                        "access-control-allow-credentials":
-                            "true"
-                    }
-                );
-
-
-                proxyRes.pipe(res);
-            },
-
-
-            /* =====================
-               ERROR
-            ===================== */
 
             error: (err, req, res) => {
 
                 console.error(
-                    "Proxy error:",
+                    "PROXY ERROR:",
                     err
                 );
 
+                if (!res.headersSent) {
 
-                if (
-                    !res.headersSent
-                ) {
-
-                    res.writeHead(
-                        502,
-                        {
-                            "content-type":
-                                "application/json; charset=utf-8",
-
-                            "access-control-allow-origin":
-                                ALLOWED_ORIGIN
-                        }
-                    );
+                    res.status(502);
                 }
-
 
                 res.end(
                     JSON.stringify({
-                        error:
-                            "Upstream proxy error",
-
-                        message:
-                            err.message
+                        error: "Proxy error",
+                        message: err.message
                     })
                 );
             }
@@ -447,7 +365,7 @@ function createSiteProxy(siteKey) {
 
 
 /* =========================
-   REGISTRA I PROXY
+   REGISTER ALL SITES
 ========================= */
 
 for (
@@ -471,7 +389,7 @@ app.listen(
     () => {
 
         console.log(
-            `AniQuiz proxy listening on port ${PORT}`
+            `AniQuiz Proxy running on port ${PORT}`
         );
     }
 );
