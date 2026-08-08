@@ -1,15 +1,12 @@
 {
   "name": "aniquiz-render-proxy",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
-  "engines": {
-    "node": ">=20"
-  },
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "http-proxy": "^1.18.1"
   }
 }
