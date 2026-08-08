@@ -22,59 +22,49 @@ app.disable("x-powered-by");
 ========================= */
 
 app.get("/health", (req, res) => {
-
     res.json({
         ok: true,
         service: "AniQuiz Proxy"
     });
-
 });
 
 
 /* =========================
-   PROXY
+   PROXY FUNCTION
 ========================= */
 
-app.use("/:site/*path", async (req, res) => {
-
-    const siteKey = req.params.site;
-
-    if (!SITES[siteKey]) {
-
-        return res.status(404).send(
-            "Unknown AniDle"
-        );
-
-    }
-
+async function proxySite(req, res, siteKey, path = "/") {
 
     const targetBase = SITES[siteKey];
 
-    /*
-     * Recuperiamo il path catturato.
-     */
-    let requestedPath = req.params.path || "";
-
-    if (!requestedPath.startsWith("/")) {
-        requestedPath = "/" + requestedPath;
+    if (!targetBase) {
+        return res.status(404).send("Unknown site");
     }
 
 
     /*
-     * Costruiamo URL originale.
+     * Normalizziamo il path.
      */
+    if (!path.startsWith("/")) {
+        path = "/" + path;
+    }
+
+
+    /*
+     * Query string.
+     */
+    const query =
+        new URLSearchParams(req.query).toString();
+
+
     const targetURL =
         targetBase +
-        requestedPath +
-        (
-            Object.keys(req.query).length
-                ? "?" + new URLSearchParams(req.query)
-                : ""
-        );
+        path +
+        (query ? "?" + query : "");
 
 
     console.log(
-        `${siteKey} → ${targetURL}`
+        `[${siteKey}] ${req.method} ${targetURL}`
     );
 
 
@@ -84,71 +74,54 @@ app.use("/:site/*path", async (req, res) => {
 
 
         /*
-         * Manteniamo User-Agent.
+         * Browser User-Agent
          */
         if (req.headers["user-agent"]) {
-
             headers["User-Agent"] =
                 req.headers["user-agent"];
-
         }
 
 
         /*
-         * Accept.
+         * Accept
          */
         if (req.headers["accept"]) {
-
             headers["Accept"] =
                 req.headers["accept"];
-
         }
 
 
         /*
-         * Accept-Language.
+         * Language
          */
         if (req.headers["accept-language"]) {
-
             headers["Accept-Language"] =
                 req.headers["accept-language"];
-
         }
 
 
         /*
-         * Cookie.
+         * Cookie
          */
         if (req.headers["cookie"]) {
-
             headers["Cookie"] =
                 req.headers["cookie"];
-
         }
 
 
-        const response =
-            await fetch(
-                targetURL,
-                {
-                    headers,
-                    redirect: "manual"
-                }
-            );
-
-
-        console.log(
-            `${siteKey} ← ${response.status}`
+        const response = await fetch(
+            targetURL,
+            {
+                method: req.method,
+                headers,
+                redirect: "manual"
+            }
         );
 
 
-        /*
-         * Copiamo il content-type.
-         */
-        const contentType =
-            response.headers.get(
-                "content-type"
-            ) || "";
+        console.log(
+            `[${siteKey}] RESPONSE ${response.status}`
+        );
 
 
         /*
@@ -163,54 +136,66 @@ app.use("/:site/*path", async (req, res) => {
         ) {
 
             const location =
-                response.headers.get(
-                    "location"
-                );
+                response.headers.get("location");
 
 
             if (location) {
 
-                const redirectURL =
-                    new URL(
-                        location,
-                        targetBase
+                try {
+
+                    const redirectURL =
+                        new URL(
+                            location,
+                            targetBase
+                        );
+
+
+                    /*
+                     * Redirect interno
+                     */
+                    if (
+                        redirectURL.origin ===
+                        new URL(targetBase).origin
+                    ) {
+
+                        return res.redirect(
+                            response.status,
+
+                            "/" +
+                            siteKey +
+                            redirectURL.pathname +
+                            redirectURL.search
+                        );
+
+                    }
+
+
+                    /*
+                     * Redirect esterno
+                     */
+                    return res.redirect(
+                        response.status,
+                        location
                     );
 
-
-                /*
-                 * Redirect interno
-                 * → redirect attraverso il proxy.
-                 */
-                if (
-                    redirectURL.origin ===
-                    new URL(targetBase).origin
-                ) {
-
-                    const proxyLocation =
-                        "/" +
-                        siteKey +
-                        redirectURL.pathname +
-                        redirectURL.search;
-
+                } catch {
 
                     return res.redirect(
                         response.status,
-                        proxyLocation
+                        location
                     );
-
                 }
-
-
-                /*
-                 * Redirect esterno.
-                 */
-                return res.redirect(
-                    response.status,
-                    location
-                );
             }
-
         }
+
+
+        /*
+         * Content-Type
+         */
+        const contentType =
+            response.headers.get(
+                "content-type"
+            ) || "";
 
 
         /*
@@ -235,31 +220,36 @@ app.use("/:site/*path", async (req, res) => {
                 ).origin;
 
 
+            const host =
+                new URL(
+                    targetBase
+                ).host;
+
+
             const proxyPrefix =
                 "/" + siteKey;
 
 
             /*
-             * Rimuove X-Frame-Options
-             * se presente come META.
+             * Elimina CSP META
              */
             html = html.replace(
-                /<meta[^>]*http-equiv=["']?X-Frame-Options["']?[^>]*>/gi,
+                /<meta[^>]*http-equiv\s*=\s*["']?Content-Security-Policy["']?[^>]*>/gi,
                 ""
             );
 
 
             /*
-             * Rimuove CSP META.
+             * Elimina X-Frame-Options META
              */
             html = html.replace(
-                /<meta[^>]*http-equiv=["']?Content-Security-Policy["']?[^>]*>/gi,
+                /<meta[^>]*http-equiv\s*=\s*["']?X-Frame-Options["']?[^>]*>/gi,
                 ""
             );
 
 
             /*
-             * Rimuove <base>.
+             * Elimina <base>
              */
             html = html.replace(
                 /<base\b[^>]*>/gi,
@@ -268,43 +258,41 @@ app.use("/:site/*path", async (req, res) => {
 
 
             /*
-             * URL assoluti.
+             * URL assoluti
              *
              * https://jujutsudle.com/foo
              *
-             * →
+             * ->
              *
              * /jujutsu/foo
              */
-            html = html.replaceAll(
-                origin,
+            html = html.split(origin).join(
                 proxyPrefix
             );
 
 
             /*
-             * URL protocol-relative.
-             *
-             * //jujutsudle.com/foo
+             * URL //
              */
-            html = html.replaceAll(
-                "//" +
-                new URL(targetBase).host,
+            html = html.split(
+                "//" + host
+            ).join(
                 proxyPrefix
             );
 
 
             /*
-             * Root-relative:
+             * URL root-relative
              *
              * src="/foo.js"
              *
-             * →
+             * ->
              *
              * src="/jujutsu/foo.js"
              */
             html = html.replace(
                 /(src|href|action|poster)\s*=\s*(["'])\/(?!\/)/gi,
+
                 (match, attribute, quote) => {
 
                     return (
@@ -320,7 +308,26 @@ app.use("/:site/*path", async (req, res) => {
 
 
             /*
-             * Risposta.
+             * Attributi senza virgolette
+             */
+            html = html.replace(
+                /(src|href|action|poster)\s*=\s*\/(?!\/)/gi,
+
+                (match, attribute) => {
+
+                    return (
+                        attribute +
+                        "=" +
+                        proxyPrefix +
+                        "/"
+                    );
+
+                }
+            );
+
+
+            /*
+             * Header
              */
             res.status(
                 response.status
@@ -333,17 +340,22 @@ app.use("/:site/*path", async (req, res) => {
             );
 
 
-            res.set(
-                "Cache-Control",
-                "no-cache"
-            );
-
-
             /*
-             * Permette iframe.
+             * IMPORTANTE:
+             * non mandiamo X-Frame-Options.
              */
             res.removeHeader(
                 "X-Frame-Options"
+            );
+
+
+            res.removeHeader(
+                "Content-Security-Policy"
+            );
+
+
+            res.removeHeader(
+                "Permissions-Policy"
             );
 
 
@@ -355,15 +367,8 @@ app.use("/:site/*path", async (req, res) => {
 
         /*
          * =========================
-         * RISORSE
+         * FILE / RISORSE
          * =========================
-         *
-         * CSS
-         * JS
-         * immagini
-         * font
-         * JSON
-         * ecc.
          */
 
         const buffer =
@@ -387,22 +392,22 @@ app.use("/:site/*path", async (req, res) => {
         }
 
 
+        /*
+         * CORS
+         */
         res.set(
             "Access-Control-Allow-Origin",
             "*"
         );
 
 
-        /*
-         * Restituisce il file.
-         */
         res.send(buffer);
 
 
     } catch (error) {
 
         console.error(
-            "PROXY ERROR:",
+            `[${siteKey}] ERROR`,
             error
         );
 
@@ -410,16 +415,93 @@ app.use("/:site/*path", async (req, res) => {
         res.status(502).json({
 
             error:
-                "Unable to fetch upstream site",
+                "Bad Gateway",
 
             message:
-                error.message
+                error.message,
+
+            target:
+                targetURL
 
         });
-
     }
+}
 
-});
+
+/* =========================
+   ROUTES
+========================= */
+
+for (const siteKey of Object.keys(SITES)) {
+
+    /*
+     * /jujutsu
+     */
+    app.get(
+        "/" + siteKey,
+        (req, res) => {
+
+            proxySite(
+                req,
+                res,
+                siteKey,
+                "/"
+            );
+
+        }
+    );
+
+
+    /*
+     * /jujutsu/
+     */
+    app.get(
+        "/" + siteKey + "/",
+        (req, res) => {
+
+            proxySite(
+                req,
+                res,
+                siteKey,
+                "/"
+            );
+
+        }
+    );
+
+
+    /*
+     * /jujutsu/qualcosa
+     */
+    app.get(
+        "/" + siteKey + "/*",
+        (req, res) => {
+
+            const prefix =
+                "/" + siteKey + "/";
+
+
+            let path =
+                req.path.substring(
+                    prefix.length - 1
+                );
+
+
+            if (!path.startsWith("/")) {
+                path = "/" + path;
+            }
+
+
+            proxySite(
+                req,
+                res,
+                siteKey,
+                path
+            );
+
+        }
+    );
+}
 
 
 /* =========================
@@ -432,7 +514,7 @@ app.listen(
     () => {
 
         console.log(
-            `AniQuiz Proxy running on port ${PORT}`
+            `AniQuiz Proxy running on ${PORT}`
         );
 
     }
