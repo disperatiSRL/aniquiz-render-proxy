@@ -7,218 +7,250 @@ const PORT = process.env.PORT || 10000;
 const TARGET = "https://jujutsudle.com";
 
 const proxy = httpProxy.createProxyServer({
-  changeOrigin: true,
-  secure: true,
-  xfwd: true,
-  followRedirects: true,
+    changeOrigin: true,
+    secure: true,
+    xfwd: true,
+    followRedirects: false,
 });
 
 app.disable("x-powered-by");
 
 // ----------------------------------------------------
-// HOME / HEALTH CHECK
+// HEALTH CHECK
 // ----------------------------------------------------
 
 app.get("/", (req, res) => {
-  res.status(200).send(`
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>AniQuiz Proxy</title>
-</head>
-<body>
-  <h1>AniQuiz Proxy Online</h1>
-  <p>Jujutsudle proxy is running.</p>
-</body>
-</html>
-`);
+    res.status(200).type("text/plain").send(
+        "AniQuiz Render Proxy is running"
+    );
 });
 
 // ----------------------------------------------------
-// PERCORSI CHE DEVONO ESSERE PROXYATI
+// COSTRUZIONE QUERY STRING
 // ----------------------------------------------------
 
-const proxyPrefixes = [
-  "/components/",
-  "/static/",
-  "/images/",
-  "/icons/",
-  "/_next/",
-  "/css/",
-  "/js/",
-  "/fonts/",
-  "/assets/"
-];
+function getQuery(req) {
+    const index = req.originalUrl.indexOf("?");
 
-function shouldProxyRootPath(path) {
-  return proxyPrefixes.some(prefix => path.startsWith(prefix));
+    if (index === -1) {
+        return "";
+    }
+
+    return req.originalUrl.substring(index);
 }
 
 // ----------------------------------------------------
-// PROXY PRINCIPALE
+// PATH DA PROXYARE
+// ----------------------------------------------------
+
+function getTargetPath(originalPath) {
+
+    // -----------------------------------------------
+    // /jujutsu/*
+    // -----------------------------------------------
+
+    if (
+        originalPath === "/jujutsu" ||
+        originalPath.startsWith("/jujutsu/")
+    ) {
+        let path = originalPath.substring("/jujutsu".length);
+
+        if (!path) {
+            path = "/";
+        }
+
+        return path;
+    }
+
+    // -----------------------------------------------
+    // FILE / CARTELLE ROOT DEL SITO
+    // -----------------------------------------------
+
+    const rootPaths = [
+        "/components/",
+        "/static/",
+        "/images/",
+        "/icons/",
+        "/_next/",
+        "/css/",
+        "/js/",
+        "/fonts/",
+        "/assets/",
+        "/jujutsukaisen.html",
+        "/manifest.webmanifest",
+        "/favicon.ico",
+        "/robots.txt",
+        "/sitemap.xml"
+    ];
+
+    for (const prefix of rootPaths) {
+        if (originalPath.startsWith(prefix)) {
+            return originalPath;
+        }
+    }
+
+    return null;
+}
+
+// ----------------------------------------------------
+// PROXY
 // ----------------------------------------------------
 
 app.use((req, res, next) => {
 
-  const originalPath = req.originalUrl.split("?")[0];
+    const originalPath = req.originalUrl.split("?")[0];
 
-  let targetPath = null;
+    const targetPath = getTargetPath(originalPath);
 
-  // -----------------------------------------------
-  // /jujutsu/*
-  // -----------------------------------------------
-
-  if (
-    originalPath === "/jujutsu" ||
-    originalPath.startsWith("/jujutsu/")
-  ) {
-
-    targetPath = originalPath.substring("/jujutsu".length);
-
-    if (!targetPath) {
-      targetPath = "/";
+    if (targetPath === null) {
+        return next();
     }
-  }
 
-  // -----------------------------------------------
-  // RISORSE ROOT-RELATIVE
-  // -----------------------------------------------
+    const query = getQuery(req);
 
-  else if (shouldProxyRootPath(originalPath)) {
+    const finalPath = targetPath + query;
 
-    targetPath = originalPath;
-  }
+    console.log(
+        `[PROXY] ${req.method} ${req.originalUrl} -> ${TARGET}${finalPath}`
+    );
 
-  // manifest
-  else if (originalPath === "/manifest.webmanifest") {
+    // IMPORTANTE:
+    // http-proxy con ignorePath=true utilizza req.url
+    // come path finale da inviare al target.
 
-    targetPath = "/manifest.webmanifest";
-  }
+    req.url = finalPath;
 
-  // favicon
-  else if (originalPath === "/favicon.ico") {
+    proxy.web(req, res, {
+        target: TARGET,
+        changeOrigin: true,
+        ignorePath: true,
 
-    targetPath = "/favicon.ico";
-  }
+        headers: {
+            Host: "jujutsudle.com",
 
-  // -----------------------------------------------
-  // NON È UNA RISORSA DEL PROXY
-  // -----------------------------------------------
+            Origin: TARGET,
 
-  if (targetPath === null) {
-    return next();
-  }
+            Referer: TARGET + "/",
 
-  console.log(
-    `[PROXY] ${req.method} ${req.originalUrl} -> ${TARGET}${targetPath}`
-  );
+            "User-Agent":
+                req.headers["user-agent"] ||
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
 
-  req.url =
-    targetPath +
-    (req.originalUrl.includes("?")
-      ? "?" + req.originalUrl.split("?").slice(1).join("?")
-      : "");
+            Accept:
+                req.headers["accept"] ||
+                "*/*",
 
-  proxy.web(req, res, {
-    target: TARGET,
-
-    changeOrigin: true,
-
-    ignorePath: true,
-
-    headers: {
-      Host: "jujutsudle.com",
-
-      Origin: TARGET,
-
-      Referer: TARGET + "/",
-
-      "User-Agent":
-        req.headers["user-agent"] ||
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
-
-      Accept:
-        req.headers.accept ||
-        "*/*",
-
-      "Accept-Language":
-        req.headers["accept-language"] ||
-        "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
-    }
-  });
+            "Accept-Language":
+                req.headers["accept-language"] ||
+                "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7"
+        }
+    });
 });
 
 // ----------------------------------------------------
-// REDIRECT
+// RISCRITTURA RISPOSTE
 // ----------------------------------------------------
 
 proxy.on("proxyRes", (proxyRes, req, res) => {
 
-  const location = proxyRes.headers.location;
+    console.log(
+        `[RESPONSE] ${req.method} ${req.url} -> ${proxyRes.statusCode}`
+    );
 
-  if (location) {
+    // -----------------------------------------------
+    // REDIRECT
+    // -----------------------------------------------
 
-    if (location.startsWith(TARGET)) {
+    const location = proxyRes.headers.location;
 
-      const newLocation =
-        location.substring(TARGET.length) || "/";
+    if (location) {
 
-      proxyRes.headers.location =
-        "/jujutsu" +
-        (newLocation.startsWith("/")
-          ? newLocation
-          : "/" + newLocation);
+        console.log(`[REDIRECT] ${location}`);
+
+        // Redirect assoluto verso jujutsudle.com
+        if (location.startsWith(TARGET)) {
+
+            const newLocation =
+                location.substring(TARGET.length) || "/";
+
+            proxyRes.headers.location =
+                "/jujutsu" +
+                (
+                    newLocation.startsWith("/")
+                        ? newLocation
+                        : "/" + newLocation
+                );
+        }
+
+        // Redirect relativo
+        else if (location.startsWith("/")) {
+
+            // Le risorse globali devono rimanere globali.
+            const globalPrefixes = [
+                "/components/",
+                "/static/",
+                "/images/",
+                "/icons/",
+                "/_next/",
+                "/css/",
+                "/js/",
+                "/fonts/",
+                "/assets/",
+                "/jujutsukaisen.html",
+                "/manifest.webmanifest",
+                "/favicon.ico"
+            ];
+
+            const isGlobal =
+                globalPrefixes.some(prefix =>
+                    location.startsWith(prefix)
+                );
+
+            if (!isGlobal) {
+                proxyRes.headers.location =
+                    "/jujutsu" + location;
+            }
+        }
     }
 
-    else if (location.startsWith("/")) {
+    // -----------------------------------------------
+    // HEADER CHE POSSONO BLOCCARE L'EMBED
+    // -----------------------------------------------
 
-      proxyRes.headers.location =
-        "/jujutsu" + location;
-    }
-  }
+    delete proxyRes.headers["content-security-policy"];
+    delete proxyRes.headers["content-security-policy-report-only"];
 
-  // Evitiamo header che possono bloccare il proxy
-  delete proxyRes.headers["content-security-policy"];
+    delete proxyRes.headers["x-frame-options"];
 
-  delete proxyRes.headers["content-security-policy-report-only"];
+    delete proxyRes.headers["cross-origin-opener-policy"];
+    delete proxyRes.headers["cross-origin-embedder-policy"];
+    delete proxyRes.headers["cross-origin-resource-policy"];
 
-  delete proxyRes.headers["x-frame-options"];
+    // -----------------------------------------------
+    // EVITA PROBLEMI CON COMPRESSIONE / REWRITE
+    // -----------------------------------------------
 
-  delete proxyRes.headers["cross-origin-opener-policy"];
+    delete proxyRes.headers["content-length"];
 
-  delete proxyRes.headers["cross-origin-embedder-policy"];
-
-  delete proxyRes.headers["cross-origin-resource-policy"];
 });
 
 // ----------------------------------------------------
-// ERRORI
+// ERRORI PROXY
 // ----------------------------------------------------
 
 proxy.on("error", (err, req, res) => {
 
-  console.error(
-    "[PROXY ERROR]",
-    err.message
-  );
+    console.error(
+        "[PROXY ERROR]",
+        err
+    );
 
-  if (!res.headersSent) {
+    if (!res.headersSent) {
 
-    res.status(502).send(`
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>502 Bad Gateway</title>
-</head>
-<body>
-<h1>502 Bad Gateway</h1>
-<pre>${escapeHtml(err.message)}</pre>
-</body>
-</html>
-`);
-  }
+        res.status(502).type("text/plain").send(
+            "Proxy error: " + err.message
+        );
+    }
 });
 
 // ----------------------------------------------------
@@ -227,7 +259,9 @@ proxy.on("error", (err, req, res) => {
 
 app.use((req, res) => {
 
-  res.status(404).send("Not Found");
+    res.status(404)
+        .type("text/plain")
+        .send("Not Found");
 });
 
 // ----------------------------------------------------
@@ -236,25 +270,11 @@ app.use((req, res) => {
 
 app.listen(PORT, "0.0.0.0", () => {
 
-  console.log(
-    `AniQuiz proxy running on port ${PORT}`
-  );
+    console.log(
+        `AniQuiz proxy running on port ${PORT}`
+    );
 
-  console.log(
-    `Target: ${TARGET}`
-  );
+    console.log(
+        `Target: ${TARGET}`
+    );
 });
-
-// ----------------------------------------------------
-// HTML ESCAPE
-// ----------------------------------------------------
-
-function escapeHtml(value) {
-
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
